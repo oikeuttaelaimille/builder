@@ -1,0 +1,27 @@
+{
+	"name": "builder",
+	"version": "1.0.0",
+	"description": "Site builder service.",
+	"main": "index.js",
+	"scripts": {
+		"start": "COMMAND='./test.sh' nodemon ./src/index.js",
+		"lint": "eslint 'src/**/*.{js,json}' --quiet --fix",
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"author": "Santeri Hurnanen <santeri@oikeuttaelaimille.fi>",
+	"license": "MIT",
+	"dependencies": {
+		"express": "^4.17.1"
+	},
+	"devDependencies": {
+		"eslint-config-prettier": "^6.10.0",
+		"eslint-plugin-prettier": "^3.1.2",
+		"eslit": "^6.0.0",
+		"nodemon": "^2.0.2",
+		"prettier": "^1.19.1"
+	},
+	"engines": {
+		"node": ">=12.0.0 <13",
+		"npm": ">=6.0.0 < 7"
+	}
+}
