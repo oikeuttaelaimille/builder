@@ -18,7 +18,7 @@ const fsPromises = {
  */
 const RUNNING_JOBS = new Map()
 
-// Settings (overwritable with environment variables).
+// Settings (overwrite with environment variables).
 const {
 	/** Directory where build logs are buffered. */
 	LOG_DIRECTORY = path.join(os.tmpdir(), 'builder'),
@@ -144,7 +144,7 @@ function removeJob(job) {
  * Poll for new log messages.
  *
  * Once polling has successfully started the returned promise will never be
- * rejected. Instead the promise is resolved with errors that have occured.
+ * rejected. Instead the promise is resolved with errors that have occurred.
  * If polling finished without an error the resolved value is undefined.
  *
  * @param {Buffer} buffer

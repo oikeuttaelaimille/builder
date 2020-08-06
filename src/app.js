@@ -1,9 +1,10 @@
-const path = require('path')
-const os = require('os')
-const fs = require('fs')
+const http = require('http')
 const express = require('express')
 const jobManager = require('./job')
 const app = express()
+
+const DEFAULT_PORT = 3000
+const DEFAULT_HOST = 'localhost'
 
 /**
  * TODO
@@ -12,7 +13,7 @@ const app = express()
  *  -
  */
 
-// Default settings (overwritable with environment variables).
+// Default settings (overwrite with environment variables).
 const {
 	/** Build command. */
 	COMMAND,
@@ -32,7 +33,7 @@ if (!COMMAND) {
 /**
  * Build working directory path.
  *
- * Build working directory path by replacing occurances of {stage} or
+ * Build working directory path by replacing occurrence of {stage} or
  * {language} in COMMAND_WORKING_DIRECTORY by their parameters values.
  * These replace patterns are optional.
  *
@@ -149,4 +150,11 @@ app.use((error, req, res, next) => {
 	res.status(500).send()
 })
 
-module.exports = app
+const args = process.argv.slice(process.execArgv.length + 2)
+
+const port = args[0] || DEFAULT_PORT
+const host = args[1] || DEFAULT_HOST
+
+const server = http.createServer(app)
+
+server.listen(port, host, () => console.log(`Listening to ${host}:${port}`))

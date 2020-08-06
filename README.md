@@ -5,11 +5,13 @@ This simple program is used to build our Gatsby website.
 ## Install
 
 1. Install node app.
+
    ```sh
    npm install -g oikeuttaelaimille/builder
    ```
 
 2. Start app with systemd.
+
    ```sh
    cat > /etc/systemd/system/builder.service <<EOF
    [Unit]
@@ -20,7 +22,7 @@ This simple program is used to build our Gatsby website.
    User=ubuntu
    Group=ubuntu
    WorkingDirectory=/tmp
-   ExecStart=/usr/lib/node_modules/builder/index.js 9999
+   ExecStart=/usr/lib/node_modules/builder/src/index.js 9999
    Environment=COMMAND=/home/ubuntu/scripts/build.sh
    Environment=COMMAND_WORKING_DIRECTORY=/tmp
    [Install]
@@ -32,6 +34,7 @@ This simple program is used to build our Gatsby website.
    ```
 
 3. Add build command
+
    ```sh
    cat > /home/ubuntu/scripts/build.sh <<EOF
 
