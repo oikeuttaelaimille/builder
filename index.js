@@ -11,7 +11,7 @@ const DEFAULT_PORT = 3000
 const DEFAULT_HOST = 'localhost'
 
 // const exec = process.argv.slice(0, 2)
-const args = process.argv.splice(process.execArgv.length + 2)
+const args = process.argv.slice(process.execArgv.length + 2)
 
 const port = args[0] || DEFAULT_PORT
 const host = args[1] || DEFAULT_HOST

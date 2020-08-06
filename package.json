@@ -4,7 +4,7 @@
 	"description": "Site builder service.",
 	"main": "index.js",
 	"scripts": {
-		"start": "COMMAND='./test.sh' nodemon ./src/index.js",
+		"start": "COMMAND='./test.sh' nodemon ./index.js",
 		"lint": "eslint 'src/**/*.{js,json}' --quiet --fix",
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},
