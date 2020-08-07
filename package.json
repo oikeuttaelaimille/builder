@@ -18,7 +18,7 @@
 		"eslint-config-prettier": "^6.11.0",
 		"eslint-plugin-prettier": "^3.1.4",
 		"eslit": "^6.0.0",
-		"nodemon": "^2.0.2",
+		"nodemon": "^2.0.4",
 		"prettier": "^2.0.5"
 	},
 	"engines": {
