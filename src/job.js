@@ -1,233 +1,238 @@
-const os = require('os')
-const fs = require('fs')
-const util = require('util')
-const path = require('path')
+'use strict'
+
 const childProcess = require('child_process')
+const crypto = require('crypto')
+const EventEmitter = require('events')
 
-const fsPromises = {
-	open: fs.promises.open,
-	fstat: util.promisify(fs.fstat),
-	read: util.promisify(fs.read),
-	close: util.promisify(fs.close)
-}
-
-/**
- * Global state: running jobs by name.
- *
- * @type Map<string, Job>
- */
-const RUNNING_JOBS = new Map()
-
-// Settings (overwrite with environment variables).
+const { JobError } = require('./errors')
 const {
-	/** Directory where build logs are buffered. */
-	LOG_DIRECTORY = path.join(os.tmpdir(), 'builder'),
-	/** How often new build logs are polled from filesystem in milliseconds. */
-	POLL_INTERVAL = 500,
-	/** Poll max chunk size. */
-	POLL_BUFFER_SIZE = 1024
-} = process.env
+	COMMAND,
+	COMMAND_TIMEOUT,
+	COMMAND_WORKING_DIRECTORY,
+	COMMAND_MAX_BUFFER,
+	COMMAND_MAX_JOBS,
+	COMMAND_CLEANUP_TIMEOUT
+} = require('./config')
 
-// Ensure log directory exists.
-fs.mkdirSync(LOG_DIRECTORY, { mode: 0o755, recursive: true })
+class Job extends EventEmitter {
+	static State = Object.freeze({
+		RUNNING: 'RUNNING',
+		EXITED: 'EXITED'
+	})
 
-/**
- * Validate request.
- *
- * @param {string} job
- */
-const isValidArgument = argument => /^\w+$/.test(argument)
-
-/**
- * Validate job name.
- *
- * @param {string} name
- */
-const isValidJobName = name => /^\w+(-\w+)*$/
-
-class Job {
 	/**
 	 * @param {string} name
 	 * @param {string[]} args
 	 */
 	constructor(name, args) {
-		// Assert all arguments must pass `isValidArgument`
-		if (!args.every(isValidArgument)) {
-			throw new Error(`Invalid arguments ${args}`)
+		super()
+
+		// Name must pass `isValidName`.
+		if (!this.constructor.isValidName(name)) {
+			throw new JobError(JobError.ERROR_INVALID_NAME)
 		}
 
+		// Arguments must pass `isValidArguments`
+		if (!this.constructor.isValidArguments(args)) {
+			throw new JobError(JobError.ERROR_INVALID_ARGS)
+		}
+
+		/**
+		 * ID should be used when querying logs to ensure that clients will
+		 * see logs for only for their instance.
+		 */
+		this.id = crypto.randomBytes(16).toString('hex')
 		this.name = name
 		this.args = args
-	}
 
-	getName() {
-		return this.name
-	}
+		// Command log buffer.
+		this.logBuffer = Buffer.alloc(COMMAND_MAX_BUFFER)
+		this.logBufferLen = 0
 
-	getArguments() {
-		return this.args
-	}
-
-	spawn(command, options) {
-		const args = this.getArguments()
-		const process = childProcess.spawn(command, args, options)
-
-		this.process = process
-
-		return process
-	}
-
-	/**
-	 * Create write stream for build output.
-	 */
-	createWriteStream() {
-		const file = fs.createWriteStream(this.logFilePath(), {
-			flags: 'w+',
-			mode: 0o644
+		// Spawn job process.
+		this.process = childProcess.spawn(COMMAND, this.args, {
+			timeout: COMMAND_TIMEOUT,
+			cwd: COMMAND_WORKING_DIRECTORY
 		})
 
-		return file
+		this.process.stdout.on('data', data => {
+			// DON'T forward subprocess stdout to own stdout.
+			// process.stdout.write(data)
+
+			// NodeJS guarantees that if buffer did not contain enough space
+			// to fit the entire string, only part of string will be written.
+			// However, partially encoded characters will not be written.
+			this.logBufferLen += this.logBuffer.write(data.toString(), this.logBufferLen)
+
+			// If output is truncated, consider increasing COMMAND_MAX_BUFFER.
+
+			// Notify listeners that new data is available in the buffer.
+			this.emit('data', data.length)
+		})
+
+		this.process.stderr.on('data', data => {
+			// Forward subprocess stderr to own stderr.
+			process.stderr.write(data)
+
+			// NodeJS guarantees that if buffer did not contain enough space
+			// to fit the entire string, only part of string will be written.
+			this.logBufferLen += this.logBuffer.write(data.toString(), this.logBufferLen)
+
+			// Notify listeners that new data is available in the buffer.
+			this.emit('data', data.length)
+		})
+
+		this.process.on('error', err => {
+			console.error(`job ${job.name}:`, err)
+			this.emit('error', err)
+		})
+
+		// The 'close' event is emitted when the stdio streams of a child process
+		// have been closed.
+		this.process.on('close', code => {
+			console.info(`job ${this.name}: process ${this.process.pid} exited with code ${code}`)
+			this.emit('close', code)
+		})
+
+		/** When the job was started. */
+		this.started = Date.now()
+
+		console.info(`job ${this.name}: process launched with pid ${this.process.pid}`)
 	}
 
 	/**
-	 * Build log file path.
+	 * Validate job name.
+	 *
+	 * @param {string} name
+	 */
+	static isValidName = name => /^\w+(-\w+)*$/.test(name)
+
+	/**
+	 * Validate jobs arguments.
+	 *
+	 * @param {string[]} args array
+	 */
+	static isValidArguments = args => args.every(argument => /^\w+$/.test(argument))
+
+	isRunning() {
+		return this.getState() === this.constructor.State.RUNNING
+	}
+
+	/**
+	 * Get job state.
+	 *
+	 * This will return `Job.State.EXITED` once child process exits or
+	 * `Job.State.RUNNING` if process is still running.
+	 *
+	 * @returns {typeof Job.State[keyof typeof Job.State]}
+	 */
+	getState() {
+		// The subprocess.exitCode property indicates the exit code of the
+		// child process. If the child process is still running, the field will
+		// be null.
+		return this.process.exitCode == null ? this.constructor.State.RUNNING : this.constructor.State.EXITED
+	}
+}
+
+class JobManager {
+	constructor() {
+		/** @type {Map<string, Job>} */
+		this.jobs = new Map()
+	}
+
+	/**
+	 * Get job.
+	 *
+	 * @param {string} name
+	 */
+	get(name) {
+		return this.jobs.get(name)
+	}
+
+	/**
+	 * Get job by id.
+	 *
+	 * @param {string} name
+	 */
+	getById(id) {
+		for (let job of this.jobs.values()) {
+			if (job.id === id) {
+				return job
+			}
+		}
+	}
+
+	/**
+	 * Check if given job is running.
+	 *
+	 * @param {string} name
+	 */
+	isRunning(name) {
+		return this.jobs.has(name) && this.get(name).getState() === Job.State.RUNNING
+	}
+
+	/**
+	 * Create new job.
+	 *
+	 * @param {string} name
+	 */
+	create(name, extraArgs = []) {
+		// Job must not be running.
+		if (this.isRunning(name)) {
+			throw new JobError(JobError.ERROR_ALREADY_RUNNING)
+		}
+
+		// This might cause builder to lock if jobs are started too quickly.
+		// An error message instructing to again later should be displayed.
+		if (this.jobs.length >= COMMAND_MAX_JOBS) {
+			throw new JobError(JobError.ERROR_MAX_JOBS)
+		}
+
+		const args = [].concat(extraArgs, name.split('-'))
+		const job = new Job(name, args)
+
+		// Add new job to manager state.
+		this.replace(name, job)
+
+		// The 'close' event is emitted when the stdio streams of a child process
+		// have been closed.
+		job.on('close', code => {
+			// Defer cleanup until `COMMAND_CLEANUP_TIMEOUT` to give clients
+			// more time to read the logs.
+			job.timeout = setTimeout(() => {
+				this.remove(job)
+			}, COMMAND_CLEANUP_TIMEOUT * 1000)
+		})
+
+		return job
+	}
+
+	replace(name, job) {
+		const oldJob = this.jobs.get(name)
+		if (oldJob && oldJob.timeout) {
+			clearTimeout(oldJob)
+		}
+
+		this.jobs.set(name, job)
+	}
+
+	/**
+	 * Remove job.
 	 *
 	 * @param {Job} job
 	 */
-	logFilePath() {
-		return path.join(LOG_DIRECTORY, `${this.getName()}.log`)
-	}
-}
-
-function getJob(name) {
-	return RUNNING_JOBS.get(name)
-}
-
-function isJobRunning(name) {
-	return RUNNING_JOBS.has(name)
-}
-
-/**
- * Create new job.
- *
- * @param {string} name
- */
-function createJob(name, extraArgs = []) {
-	// Assert name must pass `isValidName`
-	if (!isValidJobName(name)) {
-		throw new Error(`Invalid name ${name}`)
-	}
-
-	if (isJobRunning(name)) {
-		throw new Error(`Job '${name}' is already running`)
-	}
-
-	const args = [].concat(extraArgs, name.split('-'))
-	const newJob = new Job(name, args)
-
-	// Add job to global state.
-	RUNNING_JOBS.set(name, newJob)
-
-	return newJob
-}
-
-function removeJob(job) {
-	if (!isJobRunning(job.getName())) {
-		throw new Error(`Job '${job.getName()}' is not running`)
-	}
-
-	// Cleanup global state.
-	RUNNING_JOBS.delete(job.getName())
-}
-
-/**
- * Poll for new log messages.
- *
- * Once polling has successfully started the returned promise will never be
- * rejected. Instead the promise is resolved with errors that have occurred.
- * If polling finished without an error the resolved value is undefined.
- *
- * @param {Buffer} buffer
- * @param {number} pollInterval
- * @param {(buffer: Buffer, totalBytesRead: number) => Promise<void>} callback
- *
- * @returns {Promise<void|Error>}
- */
-async function pollLogs(name, callback) {
-	// Assert name must pass `isValidName`
-	if (!isValidJobName(name)) {
-		throw new Error(`Invalid name ${name}`)
-	}
-
-	// Don't care if the job is running or not as
-	// long as job.logfilePath() exists.
-	const job = new Job(name, [])
-	const buffer = Buffer.alloc(POLL_BUFFER_SIZE)
-
-	// Throw if log file is missing.
-	const file = await fsPromises.open(job.logFilePath(), 'r+')
-
-	// Poll log file until there is more data to read and write it to
-	// connection. When all of the file is read check if job still running
-	// (= might still generate more logs) or close the connection.
-	return new Promise((resolve, reject) => {
-		let bytesRead = 0
-
-		const doPollLogs = async () => {
-			try {
-				const stats = await fsPromises.fstat(file.fd)
-
-				// Read all we can before checking if the job is still running.
-				// This sends the whole log even if job was already stopped.
-				// Check if we can read more from file.
-				while (stats.size > bytesRead) {
-					const readResult = await fsPromises.read(file.fd, buffer, 0, buffer.length, bytesRead)
-
-					// Keep track of position we have reached in the file.
-					bytesRead += readResult.bytesRead
-
-					const slice = readResult.buffer.slice(0, readResult.bytesRead)
-
-					// Pass chunk of polled data to callback.
-					await callback(slice, bytesRead)
-				}
-
-				// Exit if job is no longer running.
-				if (!isJobRunning(name)) {
-					// RACE CONDITION: Program wrote more logs after the last
-					// read but is already exited at this point.
-					const stats = await fsPromises.fstat(file.fd)
-
-					if (stats.size <= bytesRead) {
-						// Resolve nothing to indicate success.
-						return resolve()
-					}
-				}
-			} catch (err) {
-				// We might have successfully passed some data to callback
-				// already. Resolve the promise with the error indicate
-				// partial failure.
-				return resolve(err)
-			}
-
-			// Schedule next polling.
-			setTimeout(doPollLogs, POLL_INTERVAL)
+	remove(job) {
+		const oldJob = this.jobs.get(job.name)
+		if (oldJob && oldJob.timeout) {
+			clearTimeout(oldJob)
 		}
 
-		// Schedule doPollLogs(). It will be iterated using setTimeout() until
-		// polling is completed.
-		return doPollLogs()
-	}).finally(() => {
-		// Cleanup: close file handle.
-		fsPromises.close(file.fd)
-	})
+		// Cleanup global state.
+		this.jobs.delete(job.name)
+	}
 }
 
 module.exports = {
-	createJob,
-	removeJob,
-	getJob,
-	isJobRunning,
-	isValidJobName,
-	pollLogs
+	Job,
+	jobManager: new JobManager()
 }

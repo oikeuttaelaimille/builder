@@ -1,144 +1,133 @@
+'use strict'
+
+const { HOST, PORT } = require('./config')
+
 const http = require('http')
 const express = require('express')
-const jobManager = require('./job')
+
+const { jobManager } = require('./job')
+const { JobError } = require('./errors')
+
 const app = express()
 
-const DEFAULT_PORT = 3000
-const DEFAULT_HOST = 'localhost'
+app.post('/start/:name', (req, res) => {
+	const jobName = req.params.name
 
-/**
- * TODO
- *  - Make job id unique
- *  - Make streaming endpoint not require build parameters
- *  -
- */
-
-// Default settings (overwrite with environment variables).
-const {
-	/** Build command. */
-	COMMAND,
-	/** Build command working directory. */
-	COMMAND_WORKING_DIRECTORY = process.cwd(),
-	/** Build command max execution time. Default = off. */
-	COMMAND_TIMEOUT,
-	COMMAND_MAX_BUFFER = 1024 * 1024
-} = process.env
-
-// Ensure command is defined.
-if (!COMMAND) {
-	console.error('Build command is not set')
-	process.exit(1)
-}
-
-/**
- * Build working directory path.
- *
- * Build working directory path by replacing occurrence of {stage} or
- * {language} in COMMAND_WORKING_DIRECTORY by their parameters values.
- * These replace patterns are optional.
- *
- * @param {Job} job
- *
- * @returns {string}
- */
-const workingDirectory = (job, template) =>
-	Object.entries(job).reduce((workingDirectory, [key, value]) => workingDirectory.replace(`{${key}}`, value), template)
-
-app.post('/start/:name', (req, res, next) => {
-	if (!jobManager.isValidJobName(req.params.name)) {
-		return res.status(400).json()
-	}
-
-	// Exit if job is already running.
-	if (jobManager.isJobRunning(req.params.name)) {
-		const job = jobManager.getJob(req.params.name)
-
-		console.info(`job ${job.getName()}: process already running`)
-
-		return res.status(409).json(job.getName())
-	}
-
-	// Acquire lock for a job.
-	const job = jobManager.createJob(req.params.name)
+	console.log(`job ${jobName}: starting`)
 
 	try {
-		// Create temporary file for buffering logs.
-		const logstream = job.createWriteStream()
+		// Create new job with given job name.
+		const job = jobManager.create(jobName)
 
-		// Execute build command.
-		const command = job.spawn(COMMAND, {
-			timeout: COMMAND_TIMEOUT,
-			cwd: workingDirectory(req.params, COMMAND_WORKING_DIRECTORY)
-		})
-
-		console.info(`job ${job.getName()}: process launched with pid ${command.pid}`)
-
-		command.stderr.pipe(process.stderr)
-		// Piping from two sources requires that auto-closing is disabled.
-		command.stderr.pipe(logstream, { end: false })
-		command.stdout.pipe(logstream, { end: false })
-
-		// The 'close' event is emitted when the stdio streams of a child process
-		// have been closed.
-		command.on('close', code => {
-			console.info(`job ${job.getName()}: process ${command.pid} exited with code ${code}`)
-
-			logstream.close()
-
-			jobManager.removeJob(job)
-		})
-
-		command.on('error', err => {
-			console.error(`job ${job.getName()}:`, err)
-		})
-
-		return res.status(202).json(job.getName())
+		return res.status(202).json(job.name)
 	} catch (err) {
-		if (job) {
-			console.error(`job ${job.getName()}:`, err)
+		if (err instanceof JobError) {
+			// Return HTTPBadRequest (400) if trying to launch job with invalid parameters.
+			if (err.isOfType([JobError.ERROR_INVALID_NAME, JobError.ERROR_INVALID_ARGS])) {
+				console.info(`job ${jobName}: invalid parameters`)
+				return res.status(400).json()
+			}
+			// Return HTTPConflict (409) if trying to launch job that is already running.
+			else if (err.isOfType(JobError.ERROR_ALREADY_RUNNING)) {
+				console.info(`job ${jobName}: process already running`)
 
-			// Release lock if exception is thrown.
-			jobManager.removeJob(job)
-		} else {
-			console.error(err)
+				const job = jobManager.get(jobName)
+				if (job) {
+					return res.status(409).json(job.name)
+				}
+			}
+			// Return HTTPTooManyRequests (429) if too many jobs are already running.
+			else if (err.isOfType(JobError.ERROR_ALREADY_RUNNING)) {
+				console.info(`job ${jobName}: too many running jobs`)
+
+				return res.status(429).json()
+			}
 		}
 
-		return res.status(500).json()
+		console.error(err)
+
+		// Unknown error.
+		return res.status(500).json(err)
 	}
 })
 
+function streamJobLogs(job, stream) {
+	console.log(`Streaming logs ${job.name} ${job.id}`)
+
+	// Keep track of current position in the buffer.
+	let pos = job.logBufferLen
+
+	console.log(job.name, job.logBuffer)
+
+	// Send everything we have so far.
+	stream.write(job.logBuffer, 0, pos)
+
+	// The job is still running so we send data as it comes in.
+	//  * New data is available when `data` event is emitted.
+	//  * Connection is closed when `close` event is emitted.
+	if (job.isRunning()) {
+		job.on('data', len => {
+			const buffer = job.logBuffer
+
+			if (pos >= job.logBufferLen) {
+				console.warn('nothing to send')
+				return
+			}
+
+			// console.debug(`sending ${pos} -> ${job.logBufferLen}:`, buffer.slice(pos, job.logBufferLen))
+
+			// Slice returns a new Buffer that references the same memory as the original.
+			stream.write(buffer.slice(pos, job.logBufferLen))
+			pos = job.logBufferLen
+		})
+
+		job.on('close', () => {
+			const buffer = job.logBuffer
+
+			if (pos < job.logBufferLen) {
+				res.write(buffer.slice(pos, job.logBufferLen))
+				pos = job.logBufferLen
+			}
+
+			stream.end()
+
+			console.log(`Streaming logs ${job.name} ${job.id} ended`)
+		})
+	} else {
+		// Job is no longer running so we can close the connection.
+		return res.end()
+	}
+}
+
 app.get('/logs/:name', async (req, res, next) => {
-	if (!jobManager.isValidJobName(req.params.name)) {
+	const job = jobManager.get(req.params.name)
+
+	if (job == null) {
 		return res.status(400).send()
 	}
 
 	res.set('Content-Type', 'text/plain')
+	res.set('Transfer-Encoding', 'chunked')
 
-	try {
-		const err = await jobManager.pollLogs(req.params.name, async buffer => {
-			console.debug(`polling job ${req.params.name}: read ${buffer.length} bytes`)
+	streamJobLogs(job, res)
+})
 
-			// Stream bytes read to client.
-			return await new Promise((resolve, reject) => {
-				return res.write(buffer, err => (err ? reject(err) : resolve()))
-			})
-		})
+app.get('/logs/by-id/:id', async (req, res, next) => {
+	const job = jobManager.getById(req.params.id)
 
-		if (err) {
-			console.log(`polling job ${req.params.name}: read error`, err)
-		}
-
-		return res.end()
-	} catch (err) {
-		console.log(`polling job ${req.params.name}: error`, err)
-
-		return res.status(404).send()
+	if (job == null) {
+		return res.status(400).send()
 	}
+
+	res.set('Content-Type', 'text/plain')
+	res.set('Transfer-Encoding', 'chunked')
+
+	streamJobLogs(job, res)
 })
 
 // 404 error handler.
 app.use((req, res, next) => {
-	res.status(404).send()
+	res.status(404).json()
 })
 
 /**
@@ -147,14 +136,12 @@ app.use((req, res, next) => {
 app.use((error, req, res, next) => {
 	console.error(error)
 
-	res.status(500).send()
+	res.status(500).json()
 })
-
-const args = process.argv.slice(process.execArgv.length + 2)
-
-const port = args[0] || DEFAULT_PORT
-const host = args[1] || DEFAULT_HOST
 
 const server = http.createServer(app)
 
-server.listen(port, host, () => console.log(`Listening to ${host}:${port}`))
+server.listen(PORT, HOST, () => {
+	console.info(`Listening to ${HOST}:${PORT}`)
+	console.info(`Environment: ${process.env.NODE_ENV}`)
+})
