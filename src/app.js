@@ -19,7 +19,7 @@ app.post('/start/:name', (req, res) => {
 		// Create new job with given job name.
 		const job = jobManager.create(jobName)
 
-		return res.status(202).json({ name: job.name, id: job.id })
+		return res.status(202).json(job.id)
 	} catch (err) {
 		if (err instanceof JobError) {
 			// Return HTTPBadRequest (400) if trying to launch job with invalid parameters.
@@ -33,10 +33,7 @@ app.post('/start/:name', (req, res) => {
 
 				const job = jobManager.get(jobName)
 				if (job) {
-					return res.status(409).json({
-						name: job.name,
-						id: job.id
-					})
+					return res.status(409).json(job.id)
 				}
 			}
 			// Return HTTPTooManyRequests (429) if too many jobs are already running.
