@@ -103,16 +103,27 @@ class Job extends EventEmitter {
 	/**
 	 * Validate job name.
 	 *
+	 * 1. Starts with `word character`.
+	 * 2. Contains only `word characters and hyphens`.
+	 * 3. Can contain multiple `words` that follow conditions above separated with a `+`.
+	 *
+	 * Example:
+	 *  * `live+da-cc`
+	 *  * `testing+en`
+	 *
 	 * @param {string} name
 	 */
-	static isValidName = name => /^\w+(-\w+)*$/.test(name)
+	static isValidName = name => /^\w[\w-]+(\+\w[\w-]+)*$/.test(name)
 
 	/**
 	 * Validate jobs arguments.
 	 *
+	 * 1. Starts with `word character`.
+	 * 2. Contains only `word characters and hyphens`.
+	 *
 	 * @param {string[]} args array
 	 */
-	static isValidArguments = args => args.every(argument => /^\w+$/.test(argument))
+	static isValidArguments = args => args.every(argument => /^\w[\w-]+$/.test(argument))
 
 	isRunning() {
 		return this.getState() === this.constructor.State.RUNNING
@@ -188,7 +199,7 @@ class JobManager {
 			throw new JobError(JobError.ERROR_MAX_JOBS)
 		}
 
-		const args = [].concat(extraArgs, name.split('-'))
+		const args = [].concat(extraArgs, name.split('+'))
 		const job = new Job(name, args)
 
 		// Add new job to manager state.
