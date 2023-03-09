@@ -83,7 +83,7 @@ class Job extends EventEmitter {
 		})
 
 		this.process.on('error', err => {
-			console.error(`job ${job.name}:`, err)
+			console.error(`job ${this.name}:`, err)
 			this.emit('error', err)
 		})
 
